@@ -1,5 +1,8 @@
 # Magic Mirror Controller
 
+A simple REST controller for managing the display of a magic mirror. The API
+allows for turning the mirror on and off, as well as querying its current state.
+
 ## Building
 
 ```bash

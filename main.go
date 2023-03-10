@@ -7,8 +7,34 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"sync"
 	"time"
 )
+
+type displayState struct {
+	On bool `json:"on"`
+}
+
+type sharedDisplayState struct {
+	sync.Mutex
+	state displayState
+}
+
+func (s *sharedDisplayState) Get() displayState {
+	s.Lock()
+	current := s.state
+	s.Unlock()
+
+	return current
+}
+
+func (s *sharedDisplayState) Set(new displayState) {
+	s.Lock()
+	s.state = new
+	s.Unlock()
+}
+
+var currentDisplayState sharedDisplayState
 
 func turnOffDisplay(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "xrandr", "--display", ":0.0", "--output", "HDMI-1", "--off")
@@ -32,15 +58,23 @@ func turnOnDisplay(ctx context.Context) error {
 	return nil
 }
 
-type displayState struct {
-	On bool `json:"on"`
+func displayStateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		getDisplayState(w, r)
+	} else if r.Method == http.MethodPut {
+		updateDisplayState(w, r)
+	} else {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
-func displayStateHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
+func getDisplayState(w http.ResponseWriter, r *http.Request) {
+	if err := json.NewEncoder(w).Encode(currentDisplayState.Get()); err != nil {
+		log.Println("Failed to encode current display state:", err)
 	}
+}
+
+func updateDisplayState(w http.ResponseWriter, r *http.Request) {
 
 	var newState displayState
 	if err := json.NewDecoder(r.Body).Decode(&newState); err != nil {
@@ -62,12 +96,19 @@ func displayStateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	currentDisplayState.Set(newState)
+
 	if err := json.NewEncoder(w).Encode(newState); err != nil {
 		log.Println("Failed to write display state response:", err)
 	}
 }
 
 func main() {
+	// We assume that the display starts in the "on" state. This is easier than
+	// parsing the `xrandr` output and will be mostly correct. It also gets
+	// fixed after the first display state update.
+	currentDisplayState.Set(displayState{On: true})
+
 	handler := http.NewServeMux()
 	handler.HandleFunc("/display-state", displayStateHandler)
 
