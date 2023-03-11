@@ -3,103 +3,80 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
-	"sync"
 	"time"
+
+	magicmirror "github.com/cdriehuys/magic-mirror-controller/internal"
 )
 
-type displayState struct {
-	On bool `json:"on"`
-}
+func createDisplayStateHandler(config magicmirror.Config, state *magicmirror.SharedDisplayState) http.HandlerFunc {
+	getDisplayState := createGetDisplayStateHandler(state)
+	updateDisplayState := createUpdateDisplayState(config, state)
 
-type sharedDisplayState struct {
-	sync.Mutex
-	state displayState
-}
-
-func (s *sharedDisplayState) Get() displayState {
-	s.Lock()
-	current := s.state
-	s.Unlock()
-
-	return current
-}
-
-func (s *sharedDisplayState) Set(new displayState) {
-	s.Lock()
-	s.state = new
-	s.Unlock()
-}
-
-var currentDisplayState sharedDisplayState
-
-func turnOffDisplay(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "xrandr", "--display", ":0.0", "--output", "HDMI-1", "--off")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("could not turn off display: %v", err)
-	}
-
-	log.Println("Turned off display.")
-
-	return nil
-}
-
-func turnOnDisplay(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "xrandr", "--display", ":0.0", "--output", "HDMI-1", "--auto", "--rotate", "left")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("could not turn on display: %v", err)
-	}
-
-	log.Println("Turned on display.")
-
-	return nil
-}
-
-func displayStateHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		getDisplayState(w, r)
-	} else if r.Method == http.MethodPut {
-		updateDisplayState(w, r)
-	} else {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			getDisplayState(w, r)
+		} else if r.Method == http.MethodPut {
+			updateDisplayState(w, r)
+		} else {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	}
 }
 
-func getDisplayState(w http.ResponseWriter, r *http.Request) {
-	if err := json.NewEncoder(w).Encode(currentDisplayState.Get()); err != nil {
-		log.Println("Failed to encode current display state:", err)
+func createGetDisplayStateHandler(state *magicmirror.SharedDisplayState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewEncoder(w).Encode(state.State()); err != nil {
+			log.Println("Failed to encode current display state:", err)
+		}
 	}
 }
 
-func updateDisplayState(w http.ResponseWriter, r *http.Request) {
+func createUpdateDisplayState(config magicmirror.Config, state *magicmirror.SharedDisplayState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var newState magicmirror.DisplayState
+		if err := json.NewDecoder(r.Body).Decode(&newState); err != nil {
+			log.Println("Could not decode new display state:", err)
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
 
-	var newState displayState
-	if err := json.NewDecoder(r.Body).Decode(&newState); err != nil {
-		log.Println("Could not decode new display state:", err)
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		return
+		var updateFunc func(context.Context, magicmirror.Config) error
+		if newState.On {
+			updateFunc = magicmirror.TurnOn
+		} else {
+			updateFunc = magicmirror.TurnOff
+		}
+
+		if err := updateFunc(r.Context(), config); err != nil {
+			log.Println("Failed to update display state:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		state.SetState(newState)
+
+		if err := json.NewEncoder(w).Encode(newState); err != nil {
+			log.Println("Failed to write display state response:", err)
+		}
 	}
+}
 
-	var updateFunc func(context.Context) error
-	if newState.On {
-		updateFunc = turnOnDisplay
-	} else {
-		updateFunc = turnOffDisplay
-	}
+func createRefreshHandler(config magicmirror.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 
-	if err := updateFunc(r.Context()); err != nil {
-		log.Println("Failed to update display state:", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
+		if err := magicmirror.Refresh(r.Context(), config); err != nil {
+			log.Println("Failed to refresh display:", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 
-	currentDisplayState.Set(newState)
-
-	if err := json.NewEncoder(w).Encode(newState); err != nil {
-		log.Println("Failed to write display state response:", err)
+		w.WriteHeader(http.StatusOK)
 	}
 }
 
@@ -107,10 +84,19 @@ func main() {
 	// We assume that the display starts in the "on" state. This is easier than
 	// parsing the `xrandr` output and will be mostly correct. It also gets
 	// fixed after the first display state update.
-	currentDisplayState.Set(displayState{On: true})
+	var sharedDisplayState magicmirror.SharedDisplayState
+	sharedDisplayState.SetState(magicmirror.DisplayState{On: true})
+
+	config := magicmirror.Config{
+		DisplayIdentifier: ":0.0",
+		OutputIdentifier:  "HDMI-1",
+		Rotation:          magicmirror.RotationLeft,
+		WindowName:        "Mozilla Firefox",
+	}
 
 	handler := http.NewServeMux()
-	handler.HandleFunc("/display-state", displayStateHandler)
+	handler.HandleFunc("/display-state", createDisplayStateHandler(config, &sharedDisplayState))
+	handler.HandleFunc("/refresh", createRefreshHandler(config))
 
 	s := &http.Server{
 		Addr:         ":8080",
