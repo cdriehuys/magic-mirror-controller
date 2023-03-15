@@ -5,4 +5,5 @@ type Config struct {
 	OutputIdentifier  string
 	Rotation          rotationIdentifier
 	WindowName        string
+	RefreshKey        string
 }

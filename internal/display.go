@@ -102,7 +102,7 @@ func Refresh(ctx context.Context, config Config) error {
 		"xdotool",
 		"key",
 		"--window", targetWindow,
-		"F5",
+		config.RefreshKey,
 	)
 	refreshCmd.Env = append(refreshCmd.Env, fmt.Sprintf("DISPLAY=%s", config.DisplayIdentifier))
 

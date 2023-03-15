@@ -92,6 +92,7 @@ func main() {
 		OutputIdentifier:  "HDMI-1",
 		Rotation:          magicmirror.RotationLeft,
 		WindowName:        "Mozilla Firefox",
+		RefreshKey:        "F5",
 	}
 
 	handler := http.NewServeMux()
